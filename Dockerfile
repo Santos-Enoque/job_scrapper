@@ -14,5 +14,5 @@ RUN pip install -r requirements.txt
 COPY . .
 
 # Specify the command to run your scraper
-# This will be the start command for your service
-CMD ["python", "scrape_emprego_mz_ai_powered.py"] 
+# The -u flag ensures that logs are not buffered and are sent straight to the console
+CMD ["python", "-u", "scrape_emprego_mz_ai_powered.py"] 
