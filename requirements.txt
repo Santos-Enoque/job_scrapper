@@ -2,3 +2,4 @@ playwright==1.44.0
 pandas==2.2.2
 python-decouple==3.8
 selectolax==0.3.30
+google-generativeai==0.7.1

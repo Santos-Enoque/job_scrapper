@@ -5,24 +5,24 @@ from playwright.async_api import async_playwright
 from selectolax.parser import HTMLParser
 from datetime import datetime
 import os
+import re
 
 # --- Configuration ---
 BASE_URL = "https://www.emprego.co.mz"
-OUTPUT_CSV_FILE = "emprego_mz_jobs.csv"
+OUTPUT_JSON_FILE = "emprego_mz_jobs.json"
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
 
 # --- Helper Functions ---
 def get_existing_job_urls(filename):
-    """Reads a CSV file to get a set of already scraped job URLs."""
+    """Reads a JSON file to get a set of already scraped job URLs."""
     if not os.path.exists(filename):
         return set()
     try:
-        df = pd.read_csv(filename)
-        if "source_url" in df.columns:
-            return set(df["source_url"])
-    except pd.errors.EmptyDataError:
+        with open(filename, 'r', encoding='utf-8') as f:
+            jobs_data = json.load(f)
+            return set(job.get("source_url", "") for job in jobs_data if job.get("source_url"))
+    except (json.JSONDecodeError, FileNotFoundError):
         return set()
-    return set()
 
 def extract_structured_data(page_content):
     """Extracts the structured JSON-LD data from the job page HTML."""
@@ -37,26 +37,101 @@ def extract_structured_data(page_content):
     except (json.JSONDecodeError, AttributeError):
         return None
 
-def extract_details_from_html(parser):
-    """Extracts 'Funções' and 'Requisitos' which are not in the JSON-LD."""
-    details = {
-        "tasks_of_the_role": "N/A",
-        "requirements": "N/A"
-    }
-    
-    def get_list_items(heading_text):
-        items = []
-        # Find the heading (h6) and then its next sibling (ul)
-        heading_node = parser.css_first(f'h6:contains("{heading_text}")')
-        if heading_node:
-            list_node = heading_node.next
-            if list_node and list_node.tag == 'ul':
-                for item in list_node.css('li'):
-                    items.append(item.text(strip=True))
-        return "\n".join(items) if items else "N/A"
+def extract_text_between_tags(html, start_tag, end_tag):
+    """Extract text content between two HTML tags."""
+    pattern = f'{re.escape(start_tag)}(.*?){re.escape(end_tag)}'
+    match = re.search(pattern, html, re.DOTALL | re.IGNORECASE)
+    if match:
+        return match.group(1).strip()
+    return ""
 
-    details["tasks_of_the_role"] = get_list_items("Funções")
-    details["requirements"] = get_list_items("Requisitos")
+def clean_html_text(html_text):
+    """Remove HTML tags and clean up text."""
+    # Remove HTML tags
+    clean = re.sub('<[^<]+?>', '', html_text)
+    # Clean up whitespace
+    clean = re.sub(r'\s+', ' ', clean)
+    return clean.strip()
+
+def extract_list_items(html, heading_text):
+    """Extract list items that come after a specific heading."""
+    # Find the heading and the ul that follows it
+    pattern = f'<h6[^>]*>{re.escape(heading_text)}</h6>\\s*<ul[^>]*>(.*?)</ul>'
+    match = re.search(pattern, html, re.DOTALL | re.IGNORECASE)
+    
+    if match:
+        ul_content = match.group(1)
+        # Extract all li items
+        li_pattern = r'<li[^>]*>(.*?)</li>'
+        li_matches = re.findall(li_pattern, ul_content, re.DOTALL | re.IGNORECASE)
+        
+        items = []
+        for li_content in li_matches:
+            clean_text = clean_html_text(li_content)
+            if clean_text:
+                items.append(clean_text)
+        
+        return "\n".join(items) if items else "N/A"
+    
+    return "N/A"
+
+def extract_details_from_html(html_content):
+    """Extracts all job details from the page's HTML content using string operations."""
+    
+    details = {
+        "job_title": "N/A",
+        "company_name": "N/A",
+        "location": "N/A",
+        "category": "N/A",
+        "publication_date": "N/A",
+        "expiring_date": "N/A",
+        "job_description": "N/A",
+        "tasks_of_the_role": "N/A",
+        "requirements": "N/A",
+        "benefits": "N/A"
+    }
+
+    # Extract job title
+    title_match = re.search(r'<h1[^>]*class="[^"]*h3[^"]*"[^>]*>(.*?)</h1>', html_content, re.DOTALL | re.IGNORECASE)
+    if title_match:
+        details["job_title"] = clean_html_text(title_match.group(1))
+
+    # Extract company name
+    company_match = re.search(r'<h3[^>]*class="[^"]*h4[^"]*"[^>]*>(.*?)</h3>', html_content, re.DOTALL | re.IGNORECASE)
+    if company_match:
+        details["company_name"] = clean_html_text(company_match.group(1))
+
+    # Extract job description (text before first h6 in medium-large-text div)
+    desc_match = re.search(r'<div[^>]*class="[^"]*medium-large-text[^"]*"[^>]*>(.*?)<h6', html_content, re.DOTALL | re.IGNORECASE)
+    if desc_match:
+        details["job_description"] = clean_html_text(desc_match.group(1))
+
+    # Extract tasks, requirements, and benefits
+    details["tasks_of_the_role"] = extract_list_items(html_content, "Funções")
+    details["requirements"] = extract_list_items(html_content, "Requisitos")
+    details["benefits"] = extract_list_items(html_content, "Benefícios")
+
+    # Extract metadata from the sidebar
+    # Location
+    location_match = re.search(r'<span[^>]*class="[^"]*column-1-3[^"]*"[^>]*>Local</span>\s*<span[^>]*class="[^"]*column-2-3[^"]*"[^>]*>(.*?)</span>', html_content, re.DOTALL | re.IGNORECASE)
+    if location_match:
+        details["location"] = clean_html_text(location_match.group(1))
+
+    # Category
+    category_match = re.search(r'<span[^>]*class="[^"]*column-1-3[^"]*"[^>]*>Categoria</span>\s*<span[^>]*class="[^"]*column-2-3[^"]*"[^>]*>(.*?)</span>', html_content, re.DOTALL | re.IGNORECASE)
+    if category_match:
+        details["category"] = clean_html_text(category_match.group(1))
+
+    # Publication date
+    pub_match = re.search(r'<span[^>]*class="[^"]*column-1-3[^"]*"[^>]*>Publicado</span>\s*<span[^>]*class="[^"]*column-2-3[^"]*"[^>]*>(.*?)</span>', html_content, re.DOTALL | re.IGNORECASE)
+    if pub_match:
+        details["publication_date"] = clean_html_text(pub_match.group(1))
+
+    # Expiry date
+    exp_match = re.search(r'<span[^>]*class="[^"]*column-1-3[^"]*"[^>]*>Expira</span>\s*<span[^>]*class="[^"]*column-2-3[^"]*"[^>]*>(.*?)</span>', html_content, re.DOTALL | re.IGNORECASE)
+    if exp_match:
+        details["expiring_date"] = clean_html_text(exp_match.group(1))
+
     return details
 
 # --- Main Scraping Logic ---
@@ -66,37 +141,56 @@ async def scrape_job_details(page, job_url):
     await page.goto(job_url, wait_until="domcontentloaded", timeout=90000)
     html = await page.content()
     
+    # First, try to get structured data
     structured_data = extract_structured_data(html)
-    if not structured_data:
-        print(f"    -! Warning: Could not find structured data for {job_url}.")
-        return None
+    
+    # Second, always get HTML data as a primary source or fallback
+    html_details = extract_details_from_html(html)
 
-    # Check if the job has expired from the JSON data
-    try:
-        expiry_date_str = structured_data.get("validThrough", "")
-        if expiry_date_str and expiry_date_str.lower() != 'expirado':
-            expiry_date = datetime.strptime(expiry_date_str, "%Y-%m-%d").date()
+    # Combine data, giving preference to structured data if it exists
+    if structured_data:
+        job_data = {
+            "job_title": structured_data.get("title", html_details["job_title"]),
+            "company_name": structured_data.get("hiringOrganization", {}).get("name", html_details["company_name"]),
+            "location": structured_data.get("jobLocation", {}).get("address", {}).get("addressLocality", html_details["location"]),
+            "category": structured_data.get("occupationalCategory", html_details["category"]),
+            "publication_date": structured_data.get("datePosted", html_details["publication_date"]),
+            "expiring_date": structured_data.get("validThrough", html_details["expiring_date"]),
+            "job_description": structured_data.get("description", html_details["job_description"]),
+            "tasks_of_the_role": html_details["tasks_of_the_role"],
+            "requirements": html_details["requirements"],
+            "benefits": html_details["benefits"],
+            "source_url": job_url,
+        }
+    else:
+        # If no structured data, rely entirely on HTML extraction
+        print(f"    -! Warning: Could not find structured data for {job_url}. Falling back to HTML parsing.")
+        html_details["source_url"] = job_url
+        job_data = html_details
+
+    # Check for expired jobs using the extracted date
+    expiry_date_str = job_data.get("expiring_date", "")
+    if expiry_date_str and expiry_date_str.lower() != 'expirado':
+        try:
+            # Handle dates like '26.06.2025' from HTML
+            expiry_date = datetime.strptime(expiry_date_str, "%d.%m.%Y").date()
             if expiry_date < datetime.now().date():
                 print(f"    -! Expired job on {expiry_date_str}. Skipping.")
                 return None
-    except (ValueError, TypeError):
-         # If validThrough is missing, malformed, or 'Expirado', we can still proceed
-        pass
-
-    html_details = extract_details_from_html(HTMLParser(html))
-
-    job_data = {
-        "job_title": structured_data.get("title", "N/A"),
-        "company_name": structured_data.get("hiringOrganization", {}).get("name", "N/A"),
-        "location": structured_data.get("jobLocation", {}).get("address", {}).get("addressLocality", "N/A"),
-        "category": structured_data.get("occupationalCategory", "N/A"),
-        "publication_date": structured_data.get("datePosted", "N/A"),
-        "expiring_date": structured_data.get("validThrough", "N/A"),
-        "job_description": structured_data.get("description", "N/A"),
-        "tasks_of_the_role": html_details["tasks_of_the_role"],
-        "requirements": html_details["requirements"],
-        "source_url": job_url,
-    }
+        except ValueError:
+            try:
+                # Handle dates like '2025-06-26' from JSON
+                expiry_date = datetime.strptime(expiry_date_str, "%Y-%m-%d").date()
+                if expiry_date < datetime.now().date():
+                    print(f"    -! Expired job on {expiry_date_str}. Skipping.")
+                    return None
+            except ValueError:
+                print(f"    -! Warning: Could not parse expiry date '{expiry_date_str}'. Proceeding anyway.")
+                pass
+    elif expiry_date_str.lower() == 'expirado':
+        print(f"    -! Expired job marked as 'Expirado'. Skipping.")
+        return None
+        
     return job_data
 
 async def get_all_job_links(page, existing_urls):
@@ -114,13 +208,47 @@ async def get_all_job_links(page, existing_urls):
         current_url = category_url
         print(f"  Scraping category: {current_url}")
         page_num = 1
+        consecutive_failures = 0
+        max_consecutive_failures = 3
+        
         while True:
             if not current_url.startswith('http'):
                 current_url = f"{BASE_URL}{current_url}"
-            await page.goto(current_url, wait_until="domcontentloaded", timeout=60000)
             
-            # Corrected selector to find the job links within the list
-            job_link_elements = await page.locator('ul.content-display > li > div > h3 > a').all()
+            # Add retry logic for network errors
+            retry_count = 0
+            max_retries = 3
+            page_loaded = False
+            
+            while retry_count < max_retries and not page_loaded:
+                try:
+                    await page.goto(current_url, wait_until="domcontentloaded", timeout=60000)
+                    page_loaded = True
+                    consecutive_failures = 0  # Reset on successful load
+                except Exception as e:
+                    retry_count += 1
+                    consecutive_failures += 1
+                    print(f"    -! Error loading page (attempt {retry_count}/{max_retries}): {e}")
+                    
+                    if retry_count < max_retries:
+                        print(f"    -> Retrying in 5 seconds...")
+                        await asyncio.sleep(5)
+                    else:
+                        print(f"    -! Failed to load page after {max_retries} attempts. Skipping to next page/category.")
+                        break
+            
+            if not page_loaded:
+                if consecutive_failures >= max_consecutive_failures:
+                    print(f"    -! Too many consecutive failures ({consecutive_failures}). Moving to next category.")
+                    break
+                else:
+                    # Try to continue to next page in this category
+                    page_num += 1
+                    current_url = f"{current_url.split('/page/')[0]}/page/{page_num}/"
+                    continue
+            
+            # Use the selector from the technical specification to find job links
+            job_link_elements = await page.locator('li.clearfix h3.normal-text a').all()
             
             if not job_link_elements:
                 print("    - No job links found on this page. Moving to next category.")
@@ -140,6 +268,8 @@ async def get_all_job_links(page, existing_urls):
                 next_page_href = await next_button.get_attribute('href')
                 current_url = next_page_href
                 page_num += 1
+                # Add a small delay between pages to be more respectful
+                await asyncio.sleep(2)
             else:
                 print("    - No more pages in this category.")
                 break
@@ -147,8 +277,42 @@ async def get_all_job_links(page, existing_urls):
     return list(new_job_urls)
 
 async def main():
-    existing_urls = get_existing_job_urls(OUTPUT_CSV_FILE)
-    print(f"Found {len(existing_urls)} existing jobs in {OUTPUT_CSV_FILE}. These will be skipped.")
+    # --- TEST MODE FOR A SINGLE URL ---
+    # This section is for testing the scraping of a single page.
+    # The normal multi-page scraping is temporarily bypassed.
+    # test_url = "https://www.emprego.co.mz/vaga/agentes-de-atendimento-de-call-center-changana-2/"
+
+    # print(f"--- Running in Test Mode ---")
+    # print(f"Scraping single URL: {test_url}")
+    
+    # async with async_playwright() as p:
+    #     browser = await p.chromium.launch(headless=True)
+    #     context = await browser.new_context(user_agent=USER_AGENT)
+    #     page = await context.new_page()
+
+    #     job_details = await scrape_job_details(page, test_url)
+        
+    #     await browser.close()
+
+    # if job_details:
+    #     print("\n--- Scraping Complete: Extracted Data ---")
+    #     # Use pprint for a clean, readable dictionary output
+    #     from pprint import pprint
+    #     pprint(job_details)
+        
+    #     # Optionally, save the single result to a test CSV
+    #     df = pd.DataFrame([job_details])
+    #     test_csv_file = "test_output.csv"
+    #     print(f"\n--- Saving to {test_csv_file} ---")
+    #     df.to_csv(test_csv_file, index=False, encoding='utf-8-sig')
+    #     print("Done.")
+    # else:
+    #     print("\n--- Failed to scrape details from the test URL. ---")
+
+    # --- ORIGINAL MAIN FUNCTION ---
+    # The original logic is commented out below. Uncomment it to run the full scraper.
+    existing_urls = get_existing_job_urls(OUTPUT_JSON_FILE)
+    print(f"Found {len(existing_urls)} existing jobs in {OUTPUT_JSON_FILE}. These will be skipped.")
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
@@ -178,17 +342,36 @@ async def main():
 
     if all_new_jobs_data:
         print(f"\n--- Scraping Complete: Extracted {len(all_new_jobs_data)} new active jobs. ---")
-        new_df = pd.DataFrame(all_new_jobs_data)
+        new_jobs_data = all_new_jobs_data
         
-        # Append to existing CSV if it exists, otherwise create new
-        if os.path.exists(OUTPUT_CSV_FILE):
-            new_df.to_csv(OUTPUT_CSV_FILE, mode='a', header=False, index=False, encoding='utf-8-sig')
-            print(f"Appended new data to {OUTPUT_CSV_FILE}")
+        # Save to JSON file
+        if save_jobs_to_json(new_jobs_data, OUTPUT_JSON_FILE):
+            print(f"Saved {len(new_jobs_data)} new active jobs to {OUTPUT_JSON_FILE}")
         else:
-            new_df.to_csv(OUTPUT_CSV_FILE, index=False, encoding='utf-8-sig')
-            print(f"Created new data file at {OUTPUT_CSV_FILE}")
+            print("\nFailed to save jobs to JSON file.")
     else:
         print("\nNo new active jobs were scraped in this run.")
+
+def save_jobs_to_json(jobs_data, filename):
+    """Save jobs data to JSON file."""
+    try:
+        # Load existing jobs if file exists
+        existing_jobs = []
+        if os.path.exists(filename):
+            with open(filename, 'r', encoding='utf-8') as f:
+                existing_jobs = json.load(f)
+        
+        # Combine existing and new jobs
+        all_jobs = existing_jobs + jobs_data
+        
+        # Save to JSON file with proper formatting
+        with open(filename, 'w', encoding='utf-8') as f:
+            json.dump(all_jobs, f, ensure_ascii=False, indent=2)
+        
+        return True
+    except Exception as e:
+        print(f"Error saving to JSON: {e}")
+        return False
 
 if __name__ == '__main__':
     asyncio.run(main())
