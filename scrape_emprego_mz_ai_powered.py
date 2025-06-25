@@ -1,11 +1,12 @@
 import asyncio
 import json
 import os
-import pandas as pd
+import re
 from playwright.async_api import async_playwright
 from datetime import datetime
 from decouple import config
 import google.generativeai as genai
+from typing import cast
 
 # --- Configuration ---
 BASE_URL = "https://www.emprego.co.mz"
@@ -15,14 +16,14 @@ LOCATIONS_FILE = "locations.json"
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
 
 # Configure the Gemini API
-GEMINI_API_KEY = config('GEMINI_API_KEY')
+GEMINI_API_KEY = cast(str, config('GEMINI_API_KEY'))
 genai.configure(api_key=GEMINI_API_KEY)
-generation_config = {
-  "temperature": 0.2,
-  "top_p": 1,
-  "top_k": 1,
-  "max_output_tokens": 8192,
-}
+generation_config = genai.GenerationConfig(
+  temperature=0.2,
+  top_p=1,
+  top_k=1,
+  max_output_tokens=8192,
+)
 safety_settings = [
     {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
     {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
@@ -130,12 +131,57 @@ def build_gemini_prompt(html_content, known_categories, known_locations):
     }}
     """
 
-async def extract_details_with_gemini(page, job_url, known_categories, known_locations):
-    """Fetches HTML and uses Gemini API to extract job details."""
-    print(f"  -> Processing with AI: {job_url}")
-    await page.goto(job_url, wait_until="domcontentloaded", timeout=60000)
-    html_content = await page.content()
+def clean_html_text(html_text):
+    """Remove HTML tags and clean up text."""
+    # Remove HTML tags
+    clean = re.sub('<[^<]+?>', '', html_text)
+    # Clean up whitespace
+    clean = re.sub(r'\s+', ' ', clean)
+    return clean.strip()
 
+async def check_if_expired_before_ai(page, job_url):
+    """
+    Visits a job page, quickly extracts the expiry date from HTML,
+    and checks if the job is expired before sending it to the AI.
+    Returns tuple: (is_expired: bool, html_content: str).
+    The html_content is returned to avoid fetching it again.
+    """
+    print(f"  -> Pre-checking for expiry: {job_url}")
+    try:
+        await page.goto(job_url, wait_until="domcontentloaded", timeout=60000)
+        html_content = await page.content()
+    except Exception as e:
+        print(f"    -! ERROR loading page {job_url} for pre-check. Skipping job. Reason: {e}")
+        return True, "" # Treat as expired if page fails to load
+
+    # Quick and dirty check for expiry date from HTML
+    exp_match = re.search(r'<span[^>]*class="[^"]*column-1-3[^"]*"[^>]*>Expira</span>\s*<span[^>]*class="[^"]*column-2-3[^"]*"[^>]*>(.*?)</span>', html_content, re.DOTALL | re.IGNORECASE)
+
+    if not exp_match:
+        print(f"    - Could not pre-determine expiry date for {job_url}. Sending to AI for full check.")
+        return False, html_content
+
+    expiry_date_str = clean_html_text(exp_match.group(1))
+
+    if "expirado" in expiry_date_str.lower():
+        print(f"  -! SKIPPING expired job (found 'Expirado'): {job_url}")
+        return True, html_content
+
+    try:
+        # Handle format "DD.MM.YYYY"
+        expiry_date = datetime.strptime(expiry_date_str, "%d.%m.%Y").date()
+        if expiry_date < datetime.now().date():
+            print(f"  -! SKIPPING expired job (date {expiry_date_str} is in the past): {job_url}")
+            return True, html_content
+    except ValueError:
+        print(f"    - Could not parse expiry date '{expiry_date_str}'. Sending to AI for full check.")
+        pass
+
+    return False, html_content
+
+async def extract_details_with_gemini(html_content, job_url, known_categories, known_locations):
+    """Uses Gemini API to extract job details from provided HTML."""
+    print(f"  -> Processing with AI: {job_url}")
     prompt = build_gemini_prompt(html_content, known_categories, known_locations)
     
     try:
@@ -199,13 +245,20 @@ async def main():
         all_new_jobs_data = []
         for i, job_url in enumerate(job_links_to_scrape):
             print(f"Processing job {i+1}/{total_links}...")
-            job_details = await extract_details_with_gemini(page, job_url, known_categories, known_locations)
+            
+            # Pre-check for expiry to save API calls
+            is_expired, html_content = await check_if_expired_before_ai(page, job_url)
+            if is_expired:
+                continue
+            
+            # If not expired, proceed with AI extraction
+            job_details = await extract_details_with_gemini(html_content, job_url, known_categories, known_locations)
             
             if job_details:
-                # Filter out expired jobs
+                # The AI might still find it's expired, which is a good fallback.
                 expiry_date_str = job_details.get("expiring_date", "")
                 if "expirado" in expiry_date_str.lower():
-                    print(f"  -! Skipping expired job: {job_url}")
+                    print(f"  -! Skipping expired job (confirmed by AI): {job_url}")
                     continue
                 
                 # Add to our list and update master lists
