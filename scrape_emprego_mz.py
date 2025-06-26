@@ -8,7 +8,7 @@ from decouple import config
 import google.generativeai as genai
 from typing import cast
 import pandas as pd
-from selectolax.parser import HTMLParser
+from lxml import html as lxml_html
 
 # --- Configuration ---
 JOBS_DB_FILE = "emprego_mz_jobs.json"
@@ -67,22 +67,24 @@ async def check_if_expired_before_ai(page, job_url):
         print(f"    -! ERROR loading page {job_url} for pre-check. Skipping. Reason: {e}")
         return True, ""
 
-    parser = HTMLParser(html_content)
-    expiry_node = parser.css_first('span.column-2-3:-soup-contains("Expirado")')
-    if expiry_node:
+    tree = lxml_html.fromstring(html_content)
+    # Use XPath to find the span containing "Expira" and get its following sibling's text
+    expiry_elements = tree.xpath('//span[contains(text(), "Expira")]/following-sibling::span')
+    
+    # Check for "Expirado" text anywhere, which is a common pattern
+    if "expirado" in html_content.lower():
         print(f"  -! SKIPPING expired job (found 'Expirado'): {job_url}")
         return True, html_content
 
-    exp_date_node = parser.css_first('span.column-1-3:contains("Expira") + span.column-2-3')
-    if exp_date_node:
-        expiry_date_str = exp_date_node.text(strip=True)
+    if expiry_elements:
+        expiry_date_str = expiry_elements[0].text_content().strip()
         try:
             expiry_date = datetime.strptime(expiry_date_str, "%d.%m.%Y").date()
             if expiry_date < datetime.now().date():
                 print(f"  -! SKIPPING expired job (date {expiry_date_str} is in the past): {job_url}")
                 return True, html_content
         except ValueError:
-            pass
+            pass # If format is different, let the AI handle it
     
     return False, html_content
 

@@ -1,6 +1,18 @@
 [
-  "Please provide the job title and description.",
-  "Please provide the job title and description.  I need that information to categorize the job.",
-  "Please provide the job title and description.  I need that information to determine the best category.",
-  "Uncategorized"
+  "Apoio ao Cliente",
+  "Aquisições e Procurement",
+  "Assistente,Gestão de Projectos",
+  "Auditoria e Consultoria",
+  "Comercial e Vendas",
+  "Contabilista",
+  "Desenvolvimento Empresarial",
+  "Design e Multimédia",
+  "Director Geral",
+  "Engenharia",
+  "Finanças e Contabilidade",
+  "Formação e Ensino",
+  "Higiene e Segurança",
+  "Informática e Programação",
+  "Monitoria e Avaliação",
+  "Supervisão e Coordenação"
 ]
