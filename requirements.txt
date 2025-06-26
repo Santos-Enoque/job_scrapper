@@ -31,3 +31,6 @@ python-dotenv==1.0.1
 pytest
 pytest-asyncio
 lxml==5.2.2
+crawl4ai==0.4.23
+httpx==0.24.1
+fake-useragent==1.4.0
